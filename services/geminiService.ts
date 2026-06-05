@@ -18,6 +18,11 @@ const getGeminiKeys = (): string[] => {
         console.error("Environment key lookup failed", e);
     }
 
+    if (typeof envKeys !== 'string') envKeys = String(envKeys);
+    if (envKeys === 'undefined' || envKeys === 'null' || !envKeys) envKeys = "";
+
+    const keys = envKeys.split(',').map(k => k.trim().replace(/['"]/g, '')).filter(k => k.length > 5 && k !== 'undefined');
+
     const defaults = [
       "AIzaSyDM0-uHXjX_LYwOLcs_j9virMFUL3eX2Xs", // Requested default
       "AIzaSyAMdJJiItIVmN3zjzWqhZZX94cL8PzGJ7M",
@@ -25,13 +30,15 @@ const getGeminiKeys = (): string[] => {
       "AIzaSyApBrvFBVOGsyzTKxJ5eBts70Hy6VMslp0"
     ].filter(Boolean);
 
-    const keys = envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
-    return keys.length > 0 ? keys : defaults;
+    if (keys.length > 0) {
+        return Array.from(new Set([...keys, ...defaults]));
+    }
+    return defaults;
 };
 
 function isQuotaError(error: any): boolean {
     const msg = error?.message?.toLowerCase() || "";
-    return msg.includes("quota") || msg.includes("429") || msg.includes("resource_exhausted") || msg.includes("limit") || msg.includes("capacity") || msg.includes("balance");
+    return msg.includes("quota") || msg.includes("429") || msg.includes("resource_exhausted") || msg.includes("limit") || msg.includes("capacity") || msg.includes("balance") || msg.includes("invalid") || msg.includes("key");
 }
 
 const withRetry = async <T>(
@@ -64,7 +71,7 @@ async function runWithFallback<T>(operation: (ai: GoogleGenAI) => Promise<T>): P
     } catch (e: any) {
       lastError = e;
       if (isQuotaError(e) && i < availableKeys.length - 1) {
-        console.warn(`[Node Rotation] Key #${i + 1} exhausted. Switching node...`);
+        console.warn(`[Node Rotation] Key #${i + 1} exhausted/invalid. Switching node...`);
         continue;
       }
       throw e;
@@ -182,28 +189,52 @@ export const generateBookStory = async (
 };
 
 export const generateIllustration = async (prompt: string, heroAvatars: string[] = []): Promise<string> => {
-  return await runWithFallback(async (ai) => {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: `Digital art: ${prompt}. Professional.`,
-      config: { imageConfig: { aspectRatio: "1:1" } }
+  return await runWithFallback(async (ai: any) => {
+    const interaction = await ai.interactions.create({
+      model: 'gemini-3.1-flash-image',
+      input: `Digital art: ${prompt}. Professional.`,
+      response_modalities: ['image', 'text'],
+      generation_config: {
+        image_config: { aspect_ratio: "1:1" }
+      }
     });
-    const imgPart = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
-    if (!imgPart) throw new Error("Image node response empty.");
-    return `data:image/png;base64,${imgPart.inlineData.data}`;
+
+    for (const step of interaction.steps) {
+      if (step.type === 'model_output') {
+        const imageContent = step.content?.find((c: any) => c.type === 'image');
+        if (imageContent && imageContent.data) {
+          const mimeType = imageContent.mime_type || 'image/png';
+          return `data:${mimeType};base64,${imageContent.data}`;
+        }
+      }
+    }
+    throw new Error("Image node response empty.");
   });
 };
 
 export const generateTTS = async (text: string, voiceName: string = 'Kore') => {
-  return await runWithFallback(async (ai) => {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-      },
+  return await runWithFallback(async (ai: any) => {
+    const interaction = await ai.interactions.create({
+      model: 'gemini-3.1-flash-tts-preview',
+      input: text,
+      response_modalities: ['AUDIO'],
+      generation_config: {
+        speech_config: {
+          voice_config: {
+            prebuilt_voice_config: { voice_name: voiceName }
+          }
+        }
+      }
     });
-    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
+
+    for (const step of interaction.steps) {
+      if (step.type === 'model_output') {
+        const audioContent = step.content?.find((c: any) => c.type === 'audio');
+        if (audioContent && audioContent.data) {
+          return audioContent.data;
+        }
+      }
+    }
+    return "";
   });
 };
