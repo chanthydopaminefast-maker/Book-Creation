@@ -10,9 +10,13 @@ const getGeminiKeys = (): string[] => {
     try {
         const metaEnv = (import.meta as any).env;
         envKeys = metaEnv?.VITE_GEMINI_API_KEYS || metaEnv?.GEMINI_API_KEY || "";
+    } catch (e) {
+        console.error("Meta environment lookup fallback", e);
+    }
         
-        if (!envKeys) {
-            envKeys = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEYS || "";
+    try {
+        if (!envKeys && typeof process !== 'undefined' && process.env) {
+            envKeys = (process.env as any).VITE_GEMINI_API_KEYS || (process.env as any).GEMINI_API_KEYS || (process.env as any).GEMINI_API_KEY || "";
         }
     } catch (e) {
         console.error("Environment key lookup failed", e);
@@ -189,52 +193,28 @@ export const generateBookStory = async (
 };
 
 export const generateIllustration = async (prompt: string, heroAvatars: string[] = []): Promise<string> => {
-  return await runWithFallback(async (ai: any) => {
-    const interaction = await ai.interactions.create({
-      model: 'gemini-3.1-flash-image',
-      input: `Digital art: ${prompt}. Professional.`,
-      response_modalities: ['image', 'text'],
-      generation_config: {
-        image_config: { aspect_ratio: "1:1" }
-      }
+  return await runWithFallback(async (ai) => {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: `Digital art: ${prompt}. Professional.`,
+      config: { imageConfig: { aspectRatio: "1:1" } }
     });
-
-    for (const step of interaction.steps) {
-      if (step.type === 'model_output') {
-        const imageContent = step.content?.find((c: any) => c.type === 'image');
-        if (imageContent && imageContent.data) {
-          const mimeType = imageContent.mime_type || 'image/png';
-          return `data:${mimeType};base64,${imageContent.data}`;
-        }
-      }
-    }
-    throw new Error("Image node response empty.");
+    const imgPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+    if (!imgPart?.inlineData?.data) throw new Error("Image node response empty.");
+    return `data:image/png;base64,${imgPart.inlineData.data}`;
   });
 };
 
 export const generateTTS = async (text: string, voiceName: string = 'Kore') => {
-  return await runWithFallback(async (ai: any) => {
-    const interaction = await ai.interactions.create({
-      model: 'gemini-3.1-flash-tts-preview',
-      input: text,
-      response_modalities: ['AUDIO'],
-      generation_config: {
-        speech_config: {
-          voice_config: {
-            prebuilt_voice_config: { voice_name: voiceName }
-          }
-        }
-      }
+  return await runWithFallback(async (ai) => {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+      },
     });
-
-    for (const step of interaction.steps) {
-      if (step.type === 'model_output') {
-        const audioContent = step.content?.find((c: any) => c.type === 'audio');
-        if (audioContent && audioContent.data) {
-          return audioContent.data;
-        }
-      }
-    }
-    return "";
+    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
   });
 };
