@@ -40,11 +40,6 @@ const getGeminiKeys = (): string[] => {
     return defaults;
 };
 
-function isQuotaError(error: any): boolean {
-    const msg = error?.message?.toLowerCase() || "";
-    return msg.includes("quota") || msg.includes("429") || msg.includes("resource_exhausted") || msg.includes("limit") || msg.includes("capacity") || msg.includes("balance") || msg.includes("invalid") || msg.includes("key");
-}
-
 const withRetry = async <T>(
   fn: () => Promise<T>,
   retries: number = 1,
@@ -60,7 +55,7 @@ const withRetry = async <T>(
 };
 
 /**
- * Executes operation with automatic rotation between keys on quota exhaustion.
+ * Executes operation with automatic rotation between keys on ANY failure.
  */
 async function runWithFallback<T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
   const availableKeys = Array.from(new Set(getGeminiKeys()));
@@ -74,21 +69,20 @@ async function runWithFallback<T>(operation: (ai: GoogleGenAI) => Promise<T>): P
       });
     } catch (e: any) {
       lastError = e;
-      if (isQuotaError(e) && i < availableKeys.length - 1) {
-        console.warn(`[Node Rotation] Key #${i + 1} exhausted/invalid. Switching node...`);
+      console.warn(`[Node Rotation] Error with key #${i + 1} (${e?.message || e}): Switching node...`);
+      if (i < availableKeys.length - 1) {
         continue;
       }
-      throw e;
     }
   }
-  throw lastError || new Error("All AI Laboratory Nodes are currently at capacity. Try again later.");
+  throw lastError || new Error("All AI Laboratory Nodes are currently exhausted. Try again in 1 minute.");
 }
 
 export const generateTracingWords = async (prompt: string, count: number = 3): Promise<string[]> => {
   return await runWithFallback(async (ai) => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: `Based on the topic: "${prompt}", generate exactly ${count} educational words suitable for kids. Return JSON with 'words' array.`,
+      model: "gemini-3.5-flash",
+      contents: `Based on the topic: "${prompt}", generate exactly ${count} educational vocabulary words suitable for kids. Return JSON with 'words' array.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -104,14 +98,13 @@ export const generateTracingWords = async (prompt: string, count: number = 3): P
 
 export const generateWordSearch = async (words: string[], level: number): Promise<string[][]> => {
   return await runWithFallback(async (ai) => {
-    // Grid size based on level (1-10) -> 10x10 to 18x18
     const gridSize = 8 + Math.floor(level);
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.5-flash",
       contents: `Create a word search grid of size ${gridSize}x${gridSize}. 
       Include these words: ${words.join(', ')}. 
-      Level ${level} difficulty (1 is easy/horizontal only, 10 is complex/all directions).
-      Return JSON with 'grid' property as a 2D array of characters.`,
+      Level ${level} difficulty.
+      Return JSON with 'grid' property as a 2D array of uppercase characters.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -136,9 +129,9 @@ export const generateWordSearch = async (words: string[], level: number): Promis
 
 export const generateObjectHint = async (imageUri: string, items: string[]): Promise<string> => {
   return await runWithFallback(async (ai) => {
-    const base64Data = imageUri.split(',')[1];
+    const base64Data = imageUri.includes(',') ? imageUri.split(',')[1] : imageUri;
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.5-flash",
       contents: [
         {
           inlineData: {
@@ -147,7 +140,7 @@ export const generateObjectHint = async (imageUri: string, items: string[]): Pro
           }
         },
         {
-          text: `This is a hidden object scene. The user is looking for these items: ${items.join(', ')}. Pick ONE item that is moderately difficult to find and describe its exact location in the image in a friendly, helpful way (e.g., "The cat is hiding behind the blue chimney in the top right corner"). Keep it concise.`
+          text: `This is a hidden object scene. The user is looking for these items: ${items.join(', ')}. Pick ONE item and describe its exact location in the image in a friendly, helpful way. Keep it concise.`
         }
       ]
     });
@@ -163,8 +156,14 @@ export const generateBookStory = async (
 ): Promise<StoryGenerationResponse> => {
   return await runWithFallback(async (ai) => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-pro-preview",
-      contents: `Generate a story titled "${titleHint}" in ${language}. Pages ${startPage} to ${startPage + pageCount - 1}. ${wordsPerPage} words/page. Tone: ${tone}. Level ${level}. Return JSON.`,
+      model: "gemini-3.5-flash",
+      contents: `Generate an engaging kids book or story titled "${titleHint}" in language ${language}. 
+      Age focus: ${ageGroup}, Genre: ${genre}, Tone: ${tone}, Vocabulary Level ${level}.
+      This is chunk of story containing pages ${startPage} to ${startPage + pageCount - 1} out of a complete book.
+      Each page should be about ${wordsPerPage} words.
+      Characters description: ${characters || "A young courageous hero"}, Setting: ${setting || "A mystical fantasy land"}.
+      If vocabularyEnabled is true, make sure to include rich terms appropriate for kids learning.
+      Return the response in a structured JSON schema.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -188,33 +187,85 @@ export const generateBookStory = async (
         }
       }
     });
-    return JSON.parse(response.text);
+    return JSON.parse(response.text || '{}');
   });
 };
 
+// =======================================================
+//  INDESTRUCTIBLE IMAGE GENERATOR WITH GRAPHIC FALLBACK
+// =======================================================
 export const generateIllustration = async (prompt: string, heroAvatars: string[] = []): Promise<string> => {
-  return await runWithFallback(async (ai) => {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: `Digital art: ${prompt}. Professional.`,
-      config: { imageConfig: { aspectRatio: "1:1" } }
+  try {
+    return await runWithFallback(async (ai) => {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: `STRICT Black and white line art vector path: ${prompt}. Professional. Clear crisp styling lines.`,
+        config: { imageConfig: { aspectRatio: "1:1" } }
+      });
+      const imgPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+      if (!imgPart?.inlineData?.data) throw new Error("Image node response empty.");
+      return `data:image/png;base64,${imgPart.inlineData.data}`;
     });
-    const imgPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-    if (!imgPart?.inlineData?.data) throw new Error("Image node response empty.");
-    return `data:image/png;base64,${imgPart.inlineData.data}`;
-  });
+  } catch (e) {
+    console.warn("Gemini Image Gen failed, executing SVG Drawing Fallback node to keep workbook operational:", e);
+    
+    // Create a beautiful, printable vector line art SVG template dynamically based on the prompt!
+    // This allows the colouring book or quest to always render and look amazing
+    const cleanPromptName = prompt.split(',')[0].replace(/STRICT BLACK AND WHITE ONLY|bold line art|coloring book style/gi, '').trim();
+    
+    const svgContent = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="100%" height="100%">
+        <rect width="100%" height="100%" fill="#ffffff"/>
+        <!-- Frame style elements -->
+        <rect x="20" y="20" width="460" height="460" rx="15" fill="none" stroke="#000000" stroke-width="4" stroke-dasharray="8 4"/>
+        
+        <!-- Stars or Sparkles deco -->
+        <path d="M 50,55 L 53,45 L 63,42 L 53,39 L 50,29 L 47,39 L 37,42 L 47,45 Z" fill="none" stroke="#000000" stroke-width="2"/>
+        <path d="M 440,55 L 443,45 L 453,42 L 443,39 L 440,29 L 437,39 L 427,42 L 437,45 Z" fill="none" stroke="#000000" stroke-width="2"/>
+        <path d="M 440,435 L 443,425 L 453,422 L 443,419 L 440,409 L 437,419 L 427,422 L 437,425 Z" fill="none" stroke="#000000" stroke-width="2"/>
+        <path d="M 50,435 L 53,425 L 63,422 L 53,419 L 50,409 L 47,419 L 37,422 L 47,425 Z" fill="none" stroke="#000000" stroke-width="2"/>
+
+        <!-- Central Character Silhouette or Sketch-Box for Colouring -->
+        <circle cx="250" cy="220" r="90" fill="none" stroke="#000000" stroke-dasharray="3 3" stroke-width="3"/>
+        <path d="M 180,310 C 180,260 320,260 320,310 Z" fill="none" stroke="#000000" stroke-width="4"/>
+        
+        <!-- Cute landscape lines -->
+        <path d="M 40,360 Q 250,300 460,360" fill="none" stroke="#000000" stroke-width="3"/>
+        <path d="M 40,390 Q 250,340 460,390" fill="none" stroke="#000000" stroke-width="2" stroke-dasharray="5 5"/>
+
+        <text x="250" y="225" font-family="'Inter', Arial, sans-serif" font-size="14" font-weight="900" fill="#000000" text-anchor="middle" letter-spacing="2">COLOR ME!</text>
+        <text x="250" y="420" font-family="'Inter', Arial, sans-serif" font-size="18" font-weight="900" fill="#000000" text-anchor="middle" letter-spacing="1">${cleanPromptName.toUpperCase()}</text>
+        <text x="250" y="445" font-family="'Inter', Arial, sans-serif" font-size="10" font-weight="bold" fill="#64748b" text-anchor="middle">Design &amp; Color your own adventure scene</text>
+      </svg>
+    `;
+
+    const encodedSvg = btoa(unescape(encodeURIComponent(svgContent)));
+    return `data:image/svg+xml;base64,${encodedSvg}`;
+  }
 };
 
+// =======================================================
+//  TEXT TO SPEECH SYSTEM WITH BROWSER SPEECH SYNTH FALLBACK
+// =======================================================
 export const generateTTS = async (text: string, voiceName: string = 'Kore') => {
-  return await runWithFallback(async (ai) => {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-      },
+  try {
+    return await runWithFallback(async (ai) => {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+        },
+      });
+      return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
     });
-    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
-  });
+  } catch (e) {
+    console.warn("Gemini TTS node did not respond, initiating Browser Web Speech synthesis player fallback.", e);
+    
+    // We register speech trigger dynamically or return a special browser intent marker code!
+    // Since we output base64 data, we can intercept and trigger standard Speak browser Synthesis!
+    // Simply return the raw text encoded in a browser synthesis fallback marker!
+    return `BROWSER_SPEECH_MAPPED_FALLBACK:${btoa(unescape(encodeURIComponent(text)))}`;
+  }
 };
