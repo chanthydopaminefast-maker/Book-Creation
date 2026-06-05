@@ -2,52 +2,75 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { StoryGenre, Language, StoryGenerationResponse, AgeGroup, LanguageTone } from "../types";
 
-/**
- * Multi-Node Fallback Architecture
- * Automatically rotates keys when a quota or balance error occurs.
- */
-const FALLBACK_KEYS = [
-  "AIzaSyDM0-uHXjX_LYwOLcs_j9virMFUL3eX2Xs", // Requested default
-  "AIzaSyAMdJJiItIVmN3zjzWqhZZX94cL8PzGJ7M",
-  "AIzaSyAqaqCaDHw2LQaYIke5CJ8ctM4oevspRig",
-  "AIzaSyApBrvFBVOGsyzTKxJ5eBts70Hy6VMslp0",
-  process.env.API_KEY, 
-].filter(Boolean) as string[];
+// ==========================================
+//  KEY ROTATION ENGINE (Supports 2+ Keys)
+// ==========================================
+const getGeminiKeys = (): string[] => {
+    let envKeys = "";
+    try {
+        const metaEnv = (import.meta as any).env;
+        envKeys = metaEnv?.VITE_GEMINI_API_KEYS || metaEnv?.GEMINI_API_KEY || "";
+        
+        if (!envKeys) {
+            envKeys = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEYS || "";
+        }
+    } catch (e) {
+        console.error("Environment key lookup failed", e);
+    }
+
+    const defaults = [
+      "AIzaSyDM0-uHXjX_LYwOLcs_j9virMFUL3eX2Xs", // Requested default
+      "AIzaSyAMdJJiItIVmN3zjzWqhZZX94cL8PzGJ7M",
+      "AIzaSyAqaqCaDHw2LQaYIke5CJ8ctM4oevspRig",
+      "AIzaSyApBrvFBVOGsyzTKxJ5eBts70Hy6VMslp0"
+    ].filter(Boolean);
+
+    const keys = envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
+    return keys.length > 0 ? keys : defaults;
+};
+
+function isQuotaError(error: any): boolean {
+    const msg = error?.message?.toLowerCase() || "";
+    return msg.includes("quota") || msg.includes("429") || msg.includes("resource_exhausted") || msg.includes("limit") || msg.includes("capacity") || msg.includes("balance");
+}
+
+const withRetry = async <T>(
+  fn: () => Promise<T>,
+  retries: number = 1,
+  delay: number = 1500
+): Promise<T> => {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries <= 0) throw error;
+    await new Promise(resolve => setTimeout(resolve, delay));
+    return withRetry(fn, retries - 1, delay * 2);
+  }
+};
 
 /**
  * Executes operation with automatic rotation between keys on quota exhaustion.
  */
 async function runWithFallback<T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
-  const uniqueKeys = Array.from(new Set(FALLBACK_KEYS));
+  const availableKeys = Array.from(new Set(getGeminiKeys()));
   let lastError: any;
 
-  for (const key of uniqueKeys) {
+  for (let i = 0; i < availableKeys.length; i++) {
     try {
-      const ai = new GoogleGenAI({ apiKey: key });
-      return await operation(ai);
+      return await withRetry(async () => {
+        const ai = new GoogleGenAI({ apiKey: availableKeys[i] });
+        return await operation(ai);
+      });
     } catch (e: any) {
       lastError = e;
-      const msg = (e.message || "").toLowerCase();
-      const isQuotaError = 
-        msg.includes("quota") || 
-        msg.includes("429") || 
-        msg.includes("exhausted") || 
-        msg.includes("limit") || 
-        msg.includes("balance") ||
-        msg.includes("billing") ||
-        msg.includes("credit") ||
-        msg.includes("capacity") ||
-        msg.includes("service_unavailable") ||
-        msg.includes("overloaded");
-
-      if (isQuotaError) {
-        console.warn(`[Node Rotation] Key ...${key.slice(-6)} busy. Switching node...`);
+      if (isQuotaError(e) && i < availableKeys.length - 1) {
+        console.warn(`[Node Rotation] Key #${i + 1} exhausted. Switching node...`);
         continue;
       }
       throw e;
     }
   }
-  throw lastError || new Error("All AI Laboratory Nodes are currently at capacity. Try again in 60s.");
+  throw lastError || new Error("All AI Laboratory Nodes are currently at capacity. Try again later.");
 }
 
 export const generateTracingWords = async (prompt: string, count: number = 3): Promise<string[]> => {
