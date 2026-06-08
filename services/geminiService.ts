@@ -197,13 +197,15 @@ export const generateBookStory = async (
 export const generateIllustration = async (prompt: string, heroAvatars: string[] = []): Promise<string> => {
   try {
     return await runWithFallback(async (ai) => {
+      // Create a generic or stylized prompt to reduce copyright blocking chances
+      const safePrompt = `A stylized, generic vector character inspired by the concept of "${prompt}". Black and white line art coloring book style, clear crisp styling lines, professional illustration.`;
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: `STRICT Black and white line art vector path: ${prompt}. Professional. Clear crisp styling lines.`,
+        model: 'gemini-3.1-flash-image',
+        contents: safePrompt,
         config: { imageConfig: { aspectRatio: "1:1" } }
       });
       const imgPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-      if (!imgPart?.inlineData?.data) throw new Error("Image node response empty.");
+      if (!imgPart?.inlineData?.data) throw new Error("Image node response empty or blocked by safety filters.");
       return `data:image/png;base64,${imgPart.inlineData.data}`;
     });
   } catch (e) {
