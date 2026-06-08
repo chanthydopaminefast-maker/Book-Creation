@@ -7,6 +7,10 @@
     <title>DPSS - Professional AI Book Creator</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        // Polyfill process.env for client-side libraries that crash on Vercel
+        window.process = { env: {} };
+    </script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@700&family=Indie+Flower&family=Patrick+Hand&family=Coming+Soon&family=Permanent+Marker&family=Schoolbell&family=Gochi+Hand&family=Kantumruy+Pro:wght@400;700&family=Freehand&family=Codystar&family=Lora:ital,wght@0,400..700;1,400..700&display=swap');
         
